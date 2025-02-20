@@ -3,9 +3,13 @@ import os
 import platform
 import subprocess
 import logging
-import winreg
 from pathlib import Path
 from typing import Dict, Optional, List
+import time
+
+# Only import winreg on Windows
+if platform.system() == "Windows":
+    import winreg
 
 class PlatformUtils:
     COMMON_APP_LOCATIONS = {
@@ -77,16 +81,18 @@ class PlatformUtils:
             return [""]
             
         try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
-                            r"SOFTWARE\Microsoft\Speech\Voices\Tokens") as key:
-                i = 0
-                while True:
-                    try:
-                        voice_key = winreg.EnumKey(key, i)
-                        voices.append(f"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\{voice_key}")
-                        i += 1
-                    except OSError:  # More general exception than WindowsError
-                        break
+            # Only run this code on Windows
+            if platform.system() == "Windows":
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
+                                r"SOFTWARE\Microsoft\Speech\Voices\Tokens") as key:
+                    i = 0
+                    while True:
+                        try:
+                            voice_key = winreg.EnumKey(key, i)
+                            voices.append(f"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\{voice_key}")
+                            i += 1
+                        except OSError:  # More general exception than WindowsError
+                            break
         except (OSError, PermissionError) as e:
             logging.error(f"Error accessing Windows voice registry: {e}")
             # Fallback to default voice
