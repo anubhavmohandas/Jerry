@@ -1,0 +1,959 @@
+# main.py
+import os
+import sys
+import asyncio
+import logging
+import platform
+import json
+from dataclasses import dataclass
+from typing import Optional, List, Dict
+from pathlib import Path
+from datetime import datetime
+
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.sentiment import SentimentIntensityAnalyzer
+import speech_recognition as sr
+import edge_tts
+import whisper
+import numpy as np
+from rich.console import Console
+from rich.logging import RichHandler
+from dotenv import load_dotenv
+
+# Import custom modules
+from system_manager import SystemManager
+from audio_manager import AudioManager
+from email_manager import EmailManager
+from weather_manager import WeatherManager
+from nlp_processor import NLPProcessor
+from context_manager import ContextManager
+from plugin_manager import PluginManager
+from wake_word_detector import WakeWordDetector
+
+@dataclass
+class AssistantConfig:
+    """Enhanced configuration for the virtual assistant"""
+    voice: str
+    language: str
+    wake_word: str
+    email_settings: Dict[str, str]
+    weather_api_key: str
+    recording_duration: int = 5
+    sample_rate: int = 16000
+    name: str = "Friday"  # Changed from Jerry to Friday
+    plugin_directory: str = "plugins"
+    
+    @classmethod
+    def from_env(cls):
+        load_dotenv()
+        return cls(
+            voice="en-US-JennyNeural" if platform.system() == "Windows" else "en-US-SaraNeural",
+            language="en-US",
+            wake_word="friday",
+            weather_api_key=os.getenv("WEATHER_API_KEY"),
+            email_settings=json.loads(os.getenv("EMAIL_SETTINGS", "{}")),
+        )
+
+class EnhancedAssistant:
+    def __init__(self, config: AssistantConfig):
+        self.config = config
+        self.console = Console()
+        
+        # Initialize NLTK components
+        nltk.download('punkt')
+        nltk.download('stopwords')
+        nltk.download('vader_lexicon')
+        
+        # Core components
+        self.audio_manager = AudioManager(config.sample_rate)
+        self.system_manager = SystemManager()
+        self.whisper_model = whisper.load_model("base")
+        self.weather_manager = WeatherManager(config.weather_api_key)
+        self.email_manager = EmailManager(config.email_settings)
+        
+        # New advanced components
+        self.nlp_processor = NLPProcessor()
+        self.context_manager = ContextManager()
+        self.plugin_manager = PluginManager(config.plugin_directory)
+        self.wake_word_detector = WakeWordDetector(config.wake_word)
+        
+        # Enhanced user interaction tracking
+        self.user_name = None
+        self.user_preferences = {}
+        self.conversation_history = []
+        
+        self.setup_logging()
+        self.initialize_sentiment_analyzer()
+
+    def initialize_sentiment_analyzer(self):
+        """Initialize the NLTK sentiment analyzer"""
+        self.sentiment_analyzer = SentimentIntensityAnalyzer()
+
+    def setup_logging(self):
+        """Enhanced logging configuration"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            handlers=[
+                RichHandler(console=self.console, rich_tracebacks=True),
+                logging.FileHandler("assistant.log")
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+
+    async def setup(self):
+        """Initialize assistant components with enhanced error handling"""
+        try:
+            await self.plugin_manager.load_plugins()
+            await self.wish_user()
+            await self.greet_and_get_name()
+            self.logger.info("Assistant setup completed successfully")
+        except Exception as e:
+            self.logger.error(f"Setup failed: {e}")
+            raise
+
+    async def wish_user(self):
+        """Enhanced user greeting with time awareness and personalization"""
+        hour = datetime.now().hour
+        current_time = time.strftime("%I:%M %p")
+        
+        if 0 <= hour < 12:
+            greeting = f"Good Morning! It's {current_time}"
+        elif 12 <= hour < 16:
+            greeting = f"Good Afternoon! It's {current_time}"
+        elif 16 <= hour < 20:
+            greeting = f"Good Evening! It's {current_time}"
+        else:
+            greeting = f"Hello! It's {current_time}"
+            
+        if self.user_name:
+            greeting = f"{self.user_name}, {greeting}"
+            
+        await self.speak(greeting)
+
+    async def speak(self, text: str):
+        """Enhanced text-to-speech with emotion and retry logic"""
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                communicator = edge_tts.Communicate(text, self.config.voice)
+                await communicator.run()
+                self.conversation_history.append({"role": "assistant", "content": text})
+                break
+            except Exception as e:
+                retry_count += 1
+                self.logger.warning(f"Speech attempt {retry_count} failed: {e}")
+                if retry_count == max_retries:
+                    self.logger.error("Speech synthesis failed completely")
+                    self.console.print(f"Speech output: {text}")
+
+    async def listen(self) -> Optional[str]:
+        """Enhanced listening with wake word detection and noise reduction"""
+        try:
+            # Wait for wake word
+            if not await self.wake_word_detector.detect():
+                return None
+                
+            # Record audio with noise reduction
+            audio_data = await self.audio_manager.record_audio(
+                duration=self.config.recording_duration,
+                noise_reduction=True
+            )
+            
+            # Transcribe using whisper
+            result = self.whisper_model.transcribe(audio_data)
+            
+            # Process through NLP
+            processed_text = self.nlp_processor.process_text(result['text'])
+            
+            # Update conversation history
+            self.conversation_history.append({"role": "user", "content": processed_text})
+            
+            return processed_text
+        except Exception as e:
+            self.logger.error(f"Listening error: {e}")
+            return None
+
+    async def process_command(self, command: str) -> bool:
+        """Enhanced command processing with NLP and context awareness"""
+        if not command:
+            return True
+            
+        # Process command through NLP
+        intent, entities = self.nlp_processor.extract_intent_and_entities(command)
+        
+        # Update context
+        self.context_manager.update_context(intent, entities)
+        
+        # Get sentiment
+        sentiment = self.sentiment_analyzer.polarity_scores(command)
+        
+        # Log interaction
+        self.logger.info(f"Command: {command}")
+        self.logger.info(f"Intent: {intent}")
+        self.logger.info(f"Entities: {entities}")
+        self.logger.info(f"Sentiment: {sentiment}")
+        
+        # Process through plugin system first
+        if await self.plugin_manager.handle_command(command, intent, entities):
+            return True
+            
+        # Built-in commands
+        try:
+            if intent == "wikipedia":
+                await self.handle_wikipedia(command)
+            elif intent == "youtube":
+                await self.handle_youtube(command)
+            elif intent == "email":
+                await self.handle_email(command, entities)
+            elif intent == "weather":
+                await self.handle_weather(entities.get("location", "London"))
+            elif intent == "system":
+                await self.handle_system_command(command)
+            elif intent == "conversation":
+                await self.handle_conversation(command, sentiment)
+            elif intent == "exit":
+                await self.speak("Goodbye! Have a great day!")
+                return False
+        except Exception as e:
+            self.logger.error(f"Command processing error: {e}")
+            await self.speak("I encountered an error processing that command.")
+            
+        return True
+
+    async def run(self):
+        """Main assistant loop with enhanced error handling and recovery"""
+        try:
+            await self.setup()
+            
+            running = True
+            while running:
+                try:
+                    command = await self.listen()
+                    if command:
+                        self.console.print(f"🗣️ You said: {command}", style="cyan")
+                        running = await self.process_command(command)
+                except KeyboardInterrupt:
+                    self.console.print("\n👋 Goodbye!", style="bold red")
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error in main loop: {e}")
+                    await self.speak("I encountered an error. Please try again.")
+                    
+        finally:
+            # Cleanup
+            await self.cleanup()
+
+    async def cleanup(self):
+        """Cleanup resources"""
+        try:
+            await self.plugin_manager.unload_plugins()
+            await self.audio_manager.cleanup()
+            self.logger.info("Cleanup completed successfully")
+        except Exception as e:
+            self.logger.error(f"Cleanup error: {e}")
+
+async def main():
+    """Application entry point with enhanced error handling"""
+    try:
+        config = AssistantConfig.from_env()
+        assistant = EnhancedAssistant(config)
+        await assistant.run()
+    except Exception as e:
+        logging.error(f"Application startup failed: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+
+import numpy as np
+import sounddevice as sd
+import webrtcvad
+import speech_recognition as sr
+from typing import Optional
+import logging
+
+class WakeWordDetector:
+    def __init__(self, wake_word: str = "jerry", sample_rate: int = 16000):
+        self.wake_word = wake_word.lower()
+        self.sample_rate = sample_rate
+        self.vad = webrtcvad.Vad(3)  # Aggressiveness level 3
+        self.frame_duration = 30  # ms
+        self.recognizer = sr.Recognizer()
+        self.energy_threshold = 300  # Adjust based on your environment
+        
+    async def detect(self) -> bool:
+        try:
+            # Record audio
+            audio_data = await self._record_audio(3)  # 3 seconds of audio
+            
+            # Convert numpy array to audio data format for speech recognition
+            audio_data_int = (audio_data * 32767).astype(np.int16)
+            
+            # Create an AudioData object
+            audio = sr.AudioData(
+                audio_data_int.tobytes(),
+                sample_rate=self.sample_rate,
+                sample_width=2  # 16-bit audio
+            )
+            
+            # Attempt to recognize speech
+            try:
+                # Use sphinx for offline recognition
+                text = self.recognizer.recognize_sphinx(audio).lower()
+                logging.info(f"Detected speech: {text}")
+                
+                # Check if wake word is in the recognized text
+                if self.wake_word in text:
+                    logging.info("Wake word detected!")
+                    return True
+                    
+            except sr.UnknownValueError:
+                logging.debug("Speech not understood")
+            except sr.RequestError as e:
+                logging.error(f"Recognition error: {e}")
+                
+            return False
+            
+        except Exception as e:
+            logging.error(f"Wake word detection error: {e}")
+            return False
+            
+    async def _record_audio(self, duration: int) -> np.ndarray:
+        """Record audio for the specified duration."""
+        logging.info(f"Recording for {duration} seconds...")
+        audio_data = sd.rec(
+            int(duration * self.sample_rate),
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype=np.float32
+        )
+        sd.wait()
+        return audio_data.flatten()
+        
+    def set_energy_threshold(self, threshold: int):
+        """Adjust the energy threshold for speech detection."""
+        self.energy_threshold = threshold
+        self.recognizer.energy_threshold = threshold
+        
+    async def calibrate(self, duration: int = 5):
+        """Calibrate the energy threshold based on ambient noise."""
+        logging.info("Calibrating... Please remain silent.")
+        try:
+            audio_data = await self._record_audio(duration)
+            energy = np.mean(np.abs(audio_data)) * 1000
+            self.energy_threshold = int(energy * 1.1)  # Add 10% margin
+            self.recognizer.energy_threshold = self.energy_threshold
+            logging.info(f"Calibrated energy threshold: {self.energy_threshold}")
+        except Exception as e:
+            logging.error(f"Calibration error: {e}")
+
+# Example usage:
+async def main():
+    # Initialize the wake word detector
+    detector = WakeWordDetector(wake_word="jerry")
+    
+    # Calibrate for your environment
+    await detector.calibrate()
+    
+    print("Listening for wake word 'Jerry'...")
+    while True:
+        if await detector.detect():
+            print("Wake word detected! Hello!")
+            # Add your response logic here
+            break
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
+
+
+
+# nlp_processor.py
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.sentiment import SentimentIntensityAnalyzer
+
+class NLPProcessor:
+    def __init__(self):
+        self.stop_words = set(stopwords.words('english'))
+        self.sentiment_analyzer = SentimentIntensityAnalyzer()
+        
+    def process_text(self, text: str) -> str:
+        tokens = word_tokenize(text.lower())
+        filtered_tokens = [w for w in tokens if w not in self.stop_words]
+        return ' '.join(filtered_tokens)
+        
+    def extract_intent_and_entities(self, text: str) -> tuple:
+        text = text.lower()
+        intent = "conversation"
+        entities = {}
+        
+        # Basic intent detection
+        if "weather" in text:
+            intent = "weather"
+            # Extract location
+            words = text.split()
+            if "in" in words:
+                loc_index = words.index("in") + 1
+                if loc_index < len(words):
+                    entities["location"] = words[loc_index]
+        elif "wiki" in text:
+            intent = "wikipedia"
+        elif "youtube" in text or "play" in text:
+            intent = "youtube"
+        elif "email" in text:
+            intent = "email"
+        elif "bye" in text or "exit" in text:
+            intent = "exit"
+            
+        return intent, entities
+
+# context_manager.py
+class ContextManager:
+    def __init__(self):
+        self.context = {
+            "current_intent": None,
+            "previous_intents": [],
+            "entities": {},
+            "user_preferences": {},
+            "conversation_turn": 0
+        }
+        
+    def update_context(self, intent: str, entities: dict):
+        if self.context["current_intent"]:
+            self.context["previous_intents"].append(self.context["current_intent"])
+        self.context["current_intent"] = intent
+        self.context["entities"].update(entities)
+        self.context["conversation_turn"] += 1
+        
+    def get_context(self) -> dict:
+        return self.context
+        
+    def clear_context(self):
+        self.context["current_intent"] = None
+        self.context["entities"] = {}
+
+# plugin_manager.py
+import importlib
+import inspect
+from pathlib import Path
+
+class PluginManager:
+    def __init__(self, plugin_directory: str):
+        self.plugin_dir = Path(plugin_directory)
+        self.plugins = {}
+        
+    async def load_plugins(self):
+        if not self.plugin_dir.exists():
+            return
+            
+        for plugin_file in self.plugin_dir.glob("*.py"):
+            if plugin_file.stem.startswith("__"):
+                continue
+                
+            try:
+                module = importlib.import_module(f"plugins.{plugin_file.stem}")
+                if hasattr(module, "setup"):
+                    self.plugins[plugin_file.stem] = module.setup()
+            except Exception as e:
+                logging.error(f"Failed to load plugin {plugin_file}: {e}")
+                
+    async def handle_command(self, command: str, intent: str, entities: dict) -> bool:
+        for plugin in self.plugins.values():
+            if hasattr(plugin, "handle_command"):
+                try:
+                    if await plugin.handle_command(command, intent, entities):
+                        return True
+                except Exception as e:
+                    logging.error(f"Plugin error: {e}")
+        return False
+        
+    async def unload_plugins(self):
+        for plugin in self.plugins.values():
+            if hasattr(plugin, "cleanup"):
+                await plugin.cleanup()
+        self.plugins.clear()
+
+# wake_word_detector.py
+import numpy as np
+import sounddevice as sd
+from scipy.io.wavfile import write
+import wave
+import webrtcvad
+import struct
+
+class WakeWordDetector:
+    def __init__(self, wake_word: str, sample_rate: int = 16000):
+        self.wake_word = wake_word
+        self.sample_rate = sample_rate
+        self.vad = webrtcvad.Vad(3)  # Aggressiveness level 3
+        self.frame_duration = 30  # ms
+        self.buffer = []
+        
+    async def detect(self) -> bool:
+        try:
+            duration = 3  # seconds
+            audio_data = await self._record_audio(duration)
+            
+            # Voice activity detection
+            frame_length = int(self.sample_rate * self.frame_duration / 1000)
+            frames = self._frame_generator(audio_data, frame_length)
+            
+            voiced_frames = 0
+            for frame in frames:
+                if self._is_speech(frame):
+                    voiced_frames += 1
+                    
+            speech_detected = voiced_frames > (duration * 1000 / self.frame_duration * 0.3)
+            if not speech_detected:
+                return False
+                
+            # Simplified wake word detection (replace with more sophisticated model)
+            return True
+            
+        except Exception as e:
+            logging.error(f"Wake word detection error: {e}")
+            return False
+            
+    def _is_speech(self, frame) -> bool:
+        try:
+            return self.vad.is_speech(frame, self.sample_rate)
+        except:
+            return False
+            
+    async def _record_audio(self, duration: int) -> np.ndarray:
+        audio_data = sd.rec(
+            int(duration * self.sample_rate),
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype=np.int16
+        )
+        sd.wait()
+        return audio_data
+        
+    def _frame_generator(self, audio: np.ndarray, frame_length: int):
+        n = len(audio)
+        offset = 0
+        while offset + frame_length < n:
+            yield audio[offset:offset + frame_length].tobytes()
+            offset += frame_length
+
+# audio_manager.py
+import numpy as np
+import sounddevice as sd
+import wave
+from scipy import signal
+
+class AudioManager:
+    def __init__(self, sample_rate: int = 16000):
+        self.sample_rate = sample_rate
+        self.noise_profile = None
+        
+    async def record_audio(self, duration: int, noise_reduction: bool = False) -> np.ndarray:
+        audio_data = sd.rec(
+            int(duration * self.sample_rate),
+            samplerate=self.sample_rate,
+            channels=1,
+            dtype=np.float32
+        )
+        sd.wait()
+        
+        if noise_reduction and audio_data is not None:
+            audio_data = self._reduce_noise(audio_data)
+            
+        return audio_data
+        
+    def _reduce_noise(self, audio_data: np.ndarray) -> np.ndarray:
+        # Simple noise reduction using spectral subtraction
+        if self.noise_profile is None:
+            # Use first 100ms as noise profile
+            noise_duration = int(0.1 * self.sample_rate)
+            self.noise_profile = audio_data[:noise_duration]
+            
+        # Compute noise spectrum
+        noise_spectrum = np.abs(np.fft.rfft(self.noise_profile))
+        
+        # Process audio in frames
+        frame_length = 2048
+        hop_length = frame_length // 2
+        
+        # Apply noise reduction
+        cleaned_audio = signal.overlap_add(
+            audio_data,
+            frame_length,
+            hop_length,
+            lambda x: self._spectral_subtract(x, noise_spectrum)
+        )
+        
+        return cleaned_audio
+        
+    def _spectral_subtract(self, frame: np.ndarray, noise_spectrum: np.ndarray) -> np.ndarray:
+        # Compute frame spectrum
+        spectrum = np.fft.rfft(frame)
+        magnitude = np.abs(spectrum)
+        phase = np.angle(spectrum)
+        
+        # Subtract noise spectrum
+        magnitude = np.maximum(magnitude - noise_spectrum, 0)
+        
+        # Reconstruct signal
+        return np.fft.irfft(magnitude * np.exp(1j * phase))
+        
+    async def cleanup(self):
+        """Cleanup resources"""
+        pass
+
+import pyttsx3                      #pip install pyttsx3
+import speech_recognition as sr     #pip install SpeechRecognition
+import datetime
+import wikipedia                    #pip install wikipedia
+import webbrowser
+import os
+import numpy
+from cv2 import cv2                 #pip install opencv-python
+import random
+from requests import get
+import pywhatkit as kit             #pip install pywhatkit
+import sys
+import time
+import pyautogui
+import smtplib                      #pip install secure-smtplib
+import requests
+import instaloader                  #pip install instaloader
+
+engine = pyttsx3.init('sapi5')
+voices = engine.getProperty('voices')
+#print(voices[1].id)
+engine.setProperty('voice', voices[1].id)
+
+def speak(audio):
+    engine.say(audio)
+    engine.runAndWait()
+
+def wishMe():
+    hour = int(datetime.datetime.now().hour)
+    tt = time.strftime("%I:%M %p")
+
+    if hour>=0 and hour<12:
+        speak(f"Hey Sir, Good Morning!, its {tt}")
+        
+    elif hour>=12 and hour<16:
+        speak(f"Hey Sir, Good Afternoon! its {tt}")
+            
+    elif hour>=16 and hour<20:
+        speak(f"Hey Sir, Good EVening! its {tt}")
+            
+    elif hour>=20 and hour<24:
+        speak(f"Hey Sir its {tt}")
+    
+    speak("I am Jerry. How may i assist you Sir?")
+
+# for news updates
+def news():
+    main_url = 'http://newsapi.org/v2/top-headlines?sources=techcrunch&apiKey=5e9421a1582e4c8993375b7a48d6f130'
+
+    main_page = requests.get(main_url).json()
+    # print(main_page)
+    articles = main_page["articles"]
+    # print (articles)
+    head = []
+    day=["first","second","third","fourth","fifth"]
+    for ar in articles:
+        head.append(ar["title"])
+    for i in range (len(day)):
+        # print(f"today's {day[i]} news is: ", head[i])
+        speak(f"today's {day[i]} news is: {head[i]}")
+
+        # Email Function
+def sendEmail(to,content):
+    server = smtplib.SMTP('smtp.gmail.com', 587)
+    server.ehlo()
+    server.starttls()
+    server.login('someone@gmail.com', 'password.')
+    server.sendmail('someone@gmail.com', to, content)
+    server.close()
+
+def takeCommand():
+    #It takes microphone input from the user and returns string output.
+
+    r = sr.Recognizer()
+    with sr.Microphone() as source:
+        print("Listening...")
+        r.pause_threshold = 0.8
+        audio = r.listen(source, timeout=1,phrase_time_limit=5)
+
+    try:
+        print("Recognizing...")
+        query = r.recognize_google(audio, language='en-in')
+        print(f"user said: {query}\n")
+
+    except Exception as e:
+        #print(e)
+
+        print("Say that again please...")
+        return "None"
+    return query
+
+if __name__ == "__main__":
+    speak('Hello Anubhav')
+    wishMe()
+    while True:
+            query= takeCommand().lower()
+#Wishing Side
+            if "hello" in query or "hi" in query or "hey" in query:
+                stMsgs = ['hi how can i help you today', 'hello there, what can i do for you', 'hey, what can i help you with today','hello, what do you want me to do today']
+                ans_q = random.choice(stMsgs)
+                speak(ans_q)  
+                ans_take_from_user_how_are_you = takeCommand()
+                            
+            elif "what's up" in query:
+                stMsgs = ['asif now im only helping you with whatever you need me for', 'I am fine!, lets talk about you are you fine?', 'oh, nothing','i am okay ! How are you']
+                ans_q = random.choice(stMsgs)
+                speak(ans_q)  
+                ans_take_from_user_how_are_you = takeCommand()
+
+            elif "how are you" in query:
+                stMsgs = ['i am fine, how about you!', 'I am fine!, lets talk about you are you fine?', 'I am nice and in full mood of helping you','i am okay ! How are you']
+                ans_q = random.choice(stMsgs)
+                speak(ans_q)  
+                ans_take_from_user_how_are_you = takeCommand()
+
+            elif "fine" in query or "im good" in query or "even im okay" in query or "nice" in query or "yeah" in query or "yes im nice" in query or "yes" in query:
+                speak("oh that's nice, anyways what can i help you with today?")
+            
+            elif "good bye" in query or "good night" in query or "shut up" in query or "bye" in query or "go offline" in query or "stop" in query:
+                speak("Have a Good Time Sir, Meet You Soon")
+                quit()
+
+# Logic for executing tasks based on query
+            elif 'wikipedia' in query:
+                speak('Searching Wikipedia....')
+                query = query.replace("wikipedia", "")
+                results = wikipedia.summary(query, sentences=2)
+                speak("According to Wikipedia")
+                print(results)
+                speak(results)
+
+            elif 'open youtube' in query:
+                webbrowser.open("youtube.com")
+
+            elif 'open google' in query:
+                speak("sir, what should i search on google")
+                cm = takeCommand().lower()
+                webbrowser.open(f"{cm}")
+            
+            elif 'play' in query:
+                song = query.replace('play', '')
+                speak('playing ' + song)
+                kit.playonyt(song)
+
+            elif 'spin the hack' in query:
+                webbrowser.open("https://www.youtube.com/c/SpinTheHack/videos")
+            
+            elif 'play my playlist' in query:
+                webbrowser.open("https://www.youtube.com/watch?v=ANbC3o6tnww&list=PLLdNcnw0xoyYcDvuqZqITW_2ytzmpFXi-")
+
+            elif 'cmd' in query:
+                os.system("start cmd")
+
+            elif 'notepad' in query:
+                npath = "C:\\WINDOWS\\system32\\notepad.exe"
+                os.startfile(npath)
+            
+            elif 'the Time'in query:
+                strTime = datetime.datetime.now().strftime("%H:%M:%S")
+                speak("Sir, the time is {strTime}")
+
+         
+            elif 'open camera' in query:
+                cap = cv2.VideoCapture(0)
+                while True:
+                    ret, img = cap.read()
+                    cv2.imshow('webcam', img)
+                    k = cv2.waitKey(20)
+                    if k==17:
+                        break
+                cap.release()
+                cv2.destroyAllWindows()
+            
+            elif 'play music' in query:
+                music_dir = "D:\\Music"
+                songs = os.listdir(music_dir)
+                rd = random.choice(songs)
+                '''
+                for song in songs:
+                    if song.endswith('.mp3'):
+                '''
+                os.startfile(os.path.join(music_dir, rd))
+
+            elif 'ip address' in query:
+                ip = get('https://api.ipify.org').text
+                speak(f"Your IP address is {ip}")
+                print(f"Your IP address is {ip}")
+           
+            elif "open mails" in query:
+                speak("okay, opening your gmail")
+                webbrowser.open("https://mail.google.com/mail/u/0/#inbox")
+            
+            elif 'send a message' in query:
+                kit.sendwhatmsg("+911234567890", "Hi Abhijith, this is a message coming from Jerry",23,45)
+                time.sleep(120)
+                speak("message has been sent")
+            
+            elif "play songs on youtube" in query:
+                kit.playonyt("see you again")
+            
+            elif 'switch the window' in query:
+                pyautogui.keyDown('alt')
+                pyautogui.press("tab")
+                time.sleep(1)
+                pyautogui.keyUp("alt")
+            
+            elif "news" in query:
+                speak("please wait sir, let me fetch news for u")
+                news()
+
+# to send email with Attachment
+            elif "send email to myself" in query:
+                    speak("sir what should i say")
+                    query = takeCommand().lower()
+                    if "send a file" in query:
+                        email = 'someone@gmail.com'    # Your Email
+                        password = 'someone.'          # Your Password
+                        send_to_email = 'test7@gmail.com'    # To Mail
+                        speak("okay sir, what is the subject for this email")
+                        query = takeCommand().lower()
+                        subject = query # subject in the email
+                        speak("and sir, what is the message for this email")
+                        query2 = takeCommand().lower()
+                        message = query2    # the message in the email
+                        speak("sir, please enter the correct path of the file into the shell")
+                        file_location = input("please enter the path here: ")     # The File attachment in the email
+
+                        speak("please wait, i am sending email now")
+
+                        msg = MIMEMultipart()
+                        msg['From'] = email
+                        msg['To'] = send_to_email
+                        msg['Subject'] = subject
+
+                        msg.attach(MIMEText(message, 'plain'))
+
+                        # Setup the attachment
+                        filename = os.path.basename(file_location)
+                        attachment = open(file_location, "rb")
+                        part = MIMEBase('application', 'octet-stream')
+                        part.set_payload(attachment.read())
+                        encoders.encode_base64(part)
+                        part.add_header('Content-Disposition', "attachment; filename= %s" % filename)
+
+                        # Attach the attachment to the MIMEMultipart object
+                        msg.attach(part)
+
+                        server = smtplib.SMTP('smtp.gmail.com', 587)
+                        server.starttls()
+                        server.login(email, password)
+                        text = msg.as_string()
+                        server.sendmail(email, send_to_email, text)
+                        server.quit()
+                        speak("email has been sent")
+                        
+                    else:
+                        email = 'someone@gmail.com'    # Your Email
+                        password = 'someone.'          # Your Password
+                        send_to_email = 'test@gmail.com'    # To Mail
+                        speak("okay sir, what is the subject for this email")
+                        query = takeCommand().lower()
+                        message = query # subject in the email
+                        speak("and sir, what is the message for this email")
+
+                        server = smtplib.SMTP('smtp.gmail.com', 587)
+                        server.starttls()
+                        server.login(email, password)
+                        server.sendmail(email, send_to_email, message)
+                        server.quit()
+                        speak("email has been sent")            
+
+# to find my location
+            elif 'where am i' in query or 'where i am'in query or 'where we are' in query:
+                speak("wait sir, let me check")
+                try:
+                    ipAdd = requests.get('https://api.ipify.org').text
+                    print(ipAdd)
+                    url = 'https://get.geojs.io/v1/ip/geo/'+ipAdd+'.json'
+                    geo_requests = requests.get(url)
+                    geo_data = geo_requests.json()
+                    # print(geo_data)
+                    city = geo_data['city']
+                    # state = geo_data['state']
+                    country = geo_data['country']
+                    speak(f'sir i am not sure, but i think we are in {city} city of {country} country')
+                except Exception as e:
+                    speak("sorry sir, due to network issue i am not able to find where we are")
+
+    
+# to check a insta profile
+            elif "insta profile" in query:
+                speak("sir please enter the username correctly.")
+                name = input("Enter username here:")
+                webbrowser.open(f"www.instagram.com/{name}")
+                speak(f"Sir, here is the Profile of the user {name}")
+                time.sleep(3)
+                speak("sir, would u like to download the profile pic of this particular account")
+                condition = takeCommand().lower()
+                if "yes" in condition:
+                    mod = instaloader.Instaloader()
+                    mod.download_profile(name, profile_pic_only=True)
+                    speak("i am done sir, profile picture is saved")
+                else:
+                    pass
+
+# To take a Screenshot
+            elif "take ss" in query or "take screenshot" in query or "take a screenshot" in query:
+                speak("sir, please tell me the name of the screenshot file")
+                name = takeCommand().lower()
+                speak("Wait sir, i am taking screenshot for you")
+                time.sleep(3)
+                img = pyautogui.screenshot()
+                img.save(f"{name}.png")
+                speak("Done sir, Screenshot is saved")
+
+# To Open Applications
+            elif 'want to code' in query:
+                codePath = "E:\\Microsoft VS Code\\Code.exe"
+                os.startfile(codePath)
+            
+            elif ' open Teams' in query or 'meeting' in query:
+                codePath = "C:\\Users\\User Name\\AppData\\Local\\Microsoft\\Teams\\Update.exe"
+                os.startfile(codePath)
+ 
+            
+ # Details of System           
+            elif "who are you" in query:
+                speak("Hello, I am Jerry, A Virtual Assistant made by Anubhav. I am here to make works easier, I am Completely made on Python and coded according to the necessities.")
+
+# to close any application
+            elif "close notepad" in query:
+                speak("Okay sir, closing Notepad")
+                os.system("taskkill /f /im notepad.exe")
+
+# to close system
+            elif 'shutdown' in query:
+                os.system("shutdown /s /t 5")
+            
+            elif 'restart' in query:
+                os.system("shutdown /r /t 5")
+
+            elif 'sleep' in query:
+                os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+
+
+Now this is a complete messed up code. Without losing any of the functionality, provide me the code in multiple segments so that i could make it work properly. 
+Also dont forget that i want it as a cross platform solution like i use windows as well as mac. so make it accordingly. 

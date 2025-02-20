@@ -1,0 +1,10 @@
+pyttsx3
+SpeechRecognition
+pywhatkit
+requests
+wikipedia
+pyautogui
+instaloader
+transformers
+python-dotenv
+pathlib
