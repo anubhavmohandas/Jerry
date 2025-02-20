@@ -1,4 +1,3 @@
-# main.py
 import os
 import random
 import json
@@ -7,6 +6,7 @@ import datetime
 import time
 from typing import Optional
 from pathlib import Path
+import argparse
 
 # Local imports
 from config import AssistantConfig
@@ -31,6 +31,14 @@ except ImportError:
 
 class VirtualAssistant:
     def __init__(self):
+        # Check if this is the first run
+        config_file = Path.home() / ".assistant_config.json"
+        if not config_file.exists():
+            print("First-time setup detected. Starting configuration wizard...")
+            from setup_wizard import SetupWizard
+            wizard = SetupWizard()
+            wizard.start_wizard()
+        
         # Check dependencies first
         self.missing_deps, self.optional_missing = self.check_dependencies()
         if self.missing_deps:
@@ -371,47 +379,44 @@ class VirtualAssistant:
             logging.error(f"Sentiment analysis error: {e}")
             return {"label": "NEUTRAL", "score": 0.5}
 
-    def generate_response(self, text):
-        """Generate a response based on input"""
-        sentiment = self.analyze_sentiment(text)
-        
-        if sentiment["label"] == "POSITIVE":
-            return random.choice([
-                "That sounds great!",
-                "I'm glad to hear that.",
-                "Wonderful!"
-            ])
-        elif sentiment["label"] == "NEGATIVE":
-            return random.choice([
-                "I'm sorry you're feeling that way.",
-                "That sounds challenging.",
-                "I hope things get better."
-            ])
-        
-        return "I'm not sure how to respond to that, but I'm here to help!"
+    def classify_intent(self, text, labels):
+        """Classify intent with lazy loading"""
+        self._ensure_nlp_loaded()
+        try:
+            return self.intent_classifier(text, candidate_labels=labels)
+        except Exception as e:
+            logging.error(f"Intent classification error: {e}")
+            return {"labels": labels, "scores": [0.5] * len(labels)}
+
+    def generate_response(self, command):
+        """Generate a response to the user's command"""
+        # Simple responses based on keywords
+        if "hello" in command:
+            return random.choice(self.personality["responses"]["greeting"])
+        elif "bye" in command:
+            return random.choice(self.personality["responses"]["farewell"])
+        else:
+            return random.choice(self.personality["responses"]["confusion"])
 
     def run(self):
-        """Main assistant loop with microphone verification"""
-        # Check if required speech modules are available
-        if "speech_recognition" in self.missing_deps or "pyttsx3" in self.missing_deps:
-            print("ERROR: Critical voice dependencies missing.")
-            print(f"Please install: pip install {' '.join(['speech_recognition', 'pyttsx3'])}")
-            return
-            
-        # Check microphone before starting
-        if not self.speech.verify_microphone():
-            print("ERROR: Microphone not functioning properly.")
-            print("Please check your microphone settings and restart.")
-            return
-        
+        """Start the assistant"""
         self.wish_user()
         
         running = True
         while running:
-            command = self.speech.listen()
-            if command:
-                running = self.process_command(command)
-                
+            user_command = input("You: ")
+            running = self.process_command(user_command)
+
 if __name__ == "__main__":
-    assistant = VirtualAssistant()
-    assistant.run()
+    # Add command-line argument parsing for setup
+    parser = argparse.ArgumentParser(description="Virtual Assistant")
+    parser.add_argument('--setup', action='store_true', help="Run the setup wizard")
+    args = parser.parse_args()
+
+    if args.setup:
+        from setup_wizard import SetupWizard
+        wizard = SetupWizard()
+        wizard.start_wizard()
+    else:
+        assistant = VirtualAssistant()
+        assistant.run()

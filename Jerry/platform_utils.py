@@ -54,7 +54,7 @@ class PlatformUtils:
         return self.system == "Linux"
         
     @classmethod
-    def is_windows_system(cls) -> bool:
+    def is_windows(cls) -> bool:
         return platform.system() == "Windows"
 
     def get_default_voice(self) -> str:

@@ -4,9 +4,8 @@ import subprocess
 
 class SystemManager:
     @staticmethod
-    def shutdown(confirm=False):
-        """Shutdown the computer with confirmation"""
-        if not confirm:
+    def shutdown(self, confirm=False, require_phrase=True):
+        if require_phrase and not confirm:
             return "Please confirm by saying 'confirm shutdown'"
             
         if platform.system() == "Windows":
